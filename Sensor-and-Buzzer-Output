@@ -30,7 +30,6 @@ quad2_end_x = 240
 quad2_end_y = 180
 
 frame_num = 0
-#intensity_array = np.zeros((2,2,60))
 intensity_queue = Queue(15)
 buzz_array = np.array([0,0])
 
