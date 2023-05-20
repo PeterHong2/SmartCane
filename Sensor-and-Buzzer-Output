@@ -1,0 +1,171 @@
+import sys
+import cv2
+import numpy as np
+import ArducamDepthCamera as ac
+from gpiozero import LED
+from time import sleep
+import time
+from queue import Queue
+from gpiozero import PWMOutputDevice
+from threading import Timer
+from decimal import Decimal
+
+print(dir(ac))
+MAX_DISTANCE = 4
+TL_Buzzer = PWMOutputDevice(12)
+TR_Buzzer = PWMOutputDevice(13)
+BL_Buzzer = PWMOutputDevice(18)
+BR_Buzzer = PWMOutputDevice(19)
+
+#Quadrant 1: Left
+quad1_start_x = 0
+quad1_start_y = 0
+quad1_end_x = 120
+quad1_end_y = 180
+
+#Quadrant 2: Right
+quad2_start_x = 120
+quad2_start_y = 0
+quad2_end_x = 240
+quad2_end_y = 180
+
+frame_num = 0
+#intensity_array = np.zeros((2,2,60))
+intensity_queue = Queue(15)
+buzz_array = np.array([0,0])
+
+prev_time = 0
+
+#Takes the frame (2D array) from ToF returns cleaned 2D array of distance values for display
+def process_frame(depth_buf: np.ndarray, amplitude_buf: np.ndarray) -> np.ndarray:
+    depth_buf = np.nan_to_num(depth_buf)
+   
+    amplitude_buf[amplitude_buf<=7] = 0
+    amplitude_buf[amplitude_buf>7] = 255
+
+    depth_buf = (1 - (depth_buf/MAX_DISTANCE)) * 255
+    depth_buf = np.clip(depth_buf, 0, 255)
+    result_frame = depth_buf.astype(np.uint8) & amplitude_buf.astype(np.uint8)
+    return result_frame
+   
+def update_intensity(depth_buf: np.ndarray, amplitude_buf: np.ndarray):
+    depth_buf[depth_buf==0] = 1000
+
+    distanceL = np.quantile(depth_buf[quad1_start_y:quad1_end_y,quad1_start_x:quad1_end_x],0.25)
+    distanceR = np.quantile(depth_buf[quad2_start_y:quad2_end_y,quad2_start_x:quad2_end_x],0.25)
+   
+    curr_frame = np.array([distanceL,distanceR])
+    add_intensity_frame(curr_frame)
+
+       
+def add_intensity_frame(curr_frame: np.ndarray):
+    if intensity_queue.full():
+        intensity_queue.get()
+        intensity_queue.put(curr_frame)
+    else:
+        intensity_queue.put(curr_frame)
+        
+def update_buzz_array(index: int):
+    buzzLVL = 0
+   
+    temp_list = list(intensity_queue.queue)
+    for frame in temp_list:
+        intensity = frame[index]
+        if intensity > 0.1 and intensity < 1:
+            buzzLVL += 1
+           
+    curr_time = time.time()
+    global prev_time
+   
+    if buzzLVL > 5 and check_changes(index) == 1:
+        buzz_array[index] = 1
+    else:
+        buzz_array[index] = 0        
+       
+    print(buzz_array)
+
+def buzzer_on(bz: PWMOutputDevice):
+    bz.on()
+
+def buzzer_off(bz: PWMOutputDevice):
+    bz.off()
+
+def pulse_buzz(bz: PWMOutputDevice):
+    t = Decimal(time.time()) % 1
+    if t > 0.4 and t < 0.7:
+        bz.on()
+        timer1 = Timer(0.2, buzzer_off, [bz])
+        timer1.start()
+        timer2 = Timer(0.3, buzzer_on, [bz])
+        timer2.start()
+        timer3 = Timer(0.4, buzzer_off, [bz])
+        timer3.start()
+
+def check_changes(index) -> int:
+    temp_list = list(intensity_queue.queue)
+    curr_intensity = (temp_list[0])[index]
+    prev_intensity = (temp_list[intensity_queue.qsize()-1])[index]
+   
+    # 0 = no change, 1 = normal change, 2= fast change
+    if (prev_intensity - curr_intensity > 1):
+        return 2
+    if ((curr_intensity - prev_intensity) > 0.1):
+        return 1
+    else:
+        return 0
+
+def activate_buzzers():
+    if (buzz_array[0] == 1):
+        pulse_buzz(TL_Buzzer)
+        pulse_buzz(BL_Buzzer)
+    elif (buzz_array[1] == 1):
+        pulse_buzz(TR_Buzzer)
+        pulse_buzz(BR_Buzzer)
+    elif (buzz_array[0] == 1 and buzz_array[1] == 1):
+        pulse_buzz(TL_Buzzer)
+        pulse_buzz(BR_Buzzer)
+    else:
+        buzzer_off(TL_Buzzer)
+        buzzer_off(TR_Buzzer)
+        buzzer_off(BL_Buzzer)
+        buzzer_off(BR_Buzzer)
+      
+def usage(argv0):
+    print("Usage: python "+argv0+" [options]")
+    print("Available options are:")
+    print(" -d        Choose the video to use")
+
+if __name__ == "__main__":
+    cam = ac.ArducamCamera()
+    if cam.init(ac.TOFConnect.CSI,0) != 0 :
+        print("initialization failed")
+    if cam.start(ac.TOFOutput.DEPTH) != 0 :
+        print("Failed to start camera")
+    cam.setControl(ac.TOFControl.RANG,MAX_DISTANCE)
+    cv2.namedWindow("preview", cv2.WINDOW_AUTOSIZE)
+   
+    while True:
+        frame = cam.requestFrame(200)
+        if frame != None:
+            depth_buf = frame.getDepthData()
+            amplitude_buf = frame.getAmplitudeData()
+            cam.releaseFrame(frame)
+           
+            amplitude_buf*=(255/1024)
+            amplitude_buf = np.clip(amplitude_buf, 0, 255)
+
+            cv2.imshow("preview_amplitude", amplitude_buf.astype(np.uint8))
+           
+            update_intensity(depth_buf,amplitude_buf)
+            activate_buzzers()
+                       
+            result_image = process_frame(depth_buf,amplitude_buf)
+            result_image = cv2.applyColorMap(result_image, cv2.COLORMAP_JET)
+
+            cv2.imshow("preview",result_image)
+
+            key = cv2.waitKey(1)
+            if key == ord("q"):
+                exit_ = True
+                cam.stop()
+                sys.exit(0)
